@@ -1,0 +1,117 @@
+defmodule ZioEx.Effect do
+  defstruct [:type, :data]
+
+  def succeed(val), do: %__MODULE__{type: :succeed, data: val}
+
+  @doc """
+  Lifts a specific Cause struct (Fail, Die, Interrupt, or Both)
+  into the Effect error channel.
+  """
+  def fail_cause(cause) when is_struct(cause) do
+    # This matches any of your Cause modules: Fail, Die, Interrupt, or Both
+    %__MODULE__{type: :fail, data: cause}
+  end
+
+  @doc "Signals an expected failure (E)"
+  def fail(err), do: %__MODULE__{type: :fail, data: %ZioEx.Cause.Fail{error: err}}
+
+  @doc "Signals a catastrophic failure (Die)"
+  def die(exception),
+    do: %__MODULE__{type: :fail, data: %ZioEx.Cause.Die{exception: exception, stacktrace: []}}
+
+  def sync(func), do: %__MODULE__{type: :sync, data: func}
+  def access(func), do: %__MODULE__{type: :access, data: func}
+  def fork(effect), do: %__MODULE__{type: :fork, data: effect}
+  def join(fiber), do: %__MODULE__{type: :join, data: fiber}
+
+  def flat_map(eff, func), do: %__MODULE__{type: :flat_map, data: {eff, func}}
+
+  @doc """
+  The ultimate recovery operator.
+  on_cause: (Cause -> Effect<B>)
+  on_success: (A -> Effect<B>)
+  """
+  def fold_cause(eff, on_cause, on_success) do
+    %__MODULE__{type: :fold_cause, data: {eff, on_cause, on_success}}
+  end
+
+  # Standard fold now just wraps fold_cause
+  def fold(eff, on_err, on_succ) do
+    fold_cause(
+      eff,
+      fn
+        %ZioEx.Cause.Fail{error: e} -> on_err.(e)
+        # Re-raise Die/Interrupt
+        cause -> %__MODULE__{type: :fail, data: cause}
+      end,
+      on_succ
+    )
+  end
+
+  def map(eff, f), do: fold(eff, &fail/1, fn v -> succeed(f.(v)) end)
+
+  def catch_all(eff, h), do: fold(eff, h, &succeed/1)
+
+  def either(eff), do: fold(eff, fn e -> succeed({:error, e}) end, fn v -> succeed({:ok, v}) end)
+
+  @doc "Guarantees the finalizer runs after the effect, regardless of outcome."
+  def ensuring(eff, finalizer) do
+    %__MODULE__{type: :ensuring, data: {eff, finalizer}}
+  end
+
+  @doc "Provides a layer to an effect, satisfying its dependencies."
+  def provide(effect, layer) do
+    # We use zio macro style logic here:
+    # 1. Run the layer to get the env map
+    # 2. Access the global env and merge the layer's output into it
+    # 3. Run the original effect with the merged env
+    flat_map(layer, fn layer_env ->
+      access(fn global_env ->
+        # Here we 'provide' the environment by merging
+        merged_env = Map.merge(global_env, layer_env)
+        # We need a way to tell the runtime to use this specific env
+        %__MODULE__{type: :provide, data: {effect, merged_env}}
+      end)
+    end)
+  end
+
+  def retry(effect, schedule, attempt \\ 0) do
+    fold(
+      effect,
+      fn err ->
+        case schedule.next.(attempt) do
+          {:cont, delay, _} ->
+            sync(fn -> Process.sleep(delay) end)
+            |> flat_map(fn _ -> retry(effect, schedule, attempt + 1) end)
+
+          :halt ->
+            fail(err)
+        end
+      end,
+      fn val -> succeed(val) end
+    )
+  end
+
+  @doc """
+  Tells the runtime: "Run this effect, but use this specific map
+  as the environment (R) instead of the global one."
+  """
+  def provide_context(effect, env) do
+    %__MODULE__{type: :provide, data: {effect, env}}
+  end
+
+  @doc "Lifts a result tuple {:ok, v} | {:error, e} into an Effect"
+  def from_result({:ok, v}), do: succeed(v)
+  def from_result({:error, e}), do: fail(e)
+
+  @doc """
+  Lifts an option.
+  If :none, the effect fails with the provided 'error_value'.
+  """
+  def from_option({:some, val}, _error_value), do: succeed(val)
+  def from_option(:none, error_value), do: fail(error_value)
+
+  @doc "A helper to lift nullable Elixir values (nil becomes :none)"
+  def from_nullable(nil, error_value), do: fail(error_value)
+  def from_nullable(val, _error_value), do: succeed(val)
+end
