@@ -351,4 +351,25 @@ defmodule ZioExTest do
 
     assert Runtime.run(final_effect) == {:ok, "AuthService with 12345"}
   end
+
+  test "memoize prevents re-running expensive layers" do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    # A layer that increments a counter when built
+    expensive_layer =
+      Effect.sync(fn ->
+        Agent.update(counter, &(&1 + 1))
+        "DB_CONN"
+      end)
+      |> Layer.from_effect(:db)
+      |> Layer.memoize()
+
+    # A program that uses the layer twice via horizontal composition
+    program = Layer.and_(expensive_layer, expensive_layer)
+
+    Runtime.run(program)
+
+    # Even though we asked for it "twice" in the 'and', it only ran once.
+    assert Agent.get(counter, & &1) == 1
+  end
 end

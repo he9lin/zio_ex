@@ -52,4 +52,27 @@ defmodule ZioEx.Layer do
       Effect.provide_context(right_layer, env_from_left)
     end)
   end
+
+  @doc """
+  Ensures that the layer is only executed once.
+  Subsequent requests for this layer will return the cached result.
+  """
+  def memoize(layer) do
+    # We use an Agent to store the state: :uninitialized | {:initialized, map}
+    {:ok, cache} = Agent.start_link(fn -> :uninitialized end)
+
+    Effect.sync(fn -> Agent.get(cache, & &1) end)
+    |> Effect.flat_map(fn
+      {:initialized, env_map} ->
+        Effect.succeed(env_map)
+
+      :uninitialized ->
+        Effect.flat_map(layer, fn env_map ->
+          Effect.sync(fn ->
+            Agent.update(cache, fn _ -> {:initialized, env_map} end)
+            env_map
+          end)
+        end)
+    end)
+  end
 end
