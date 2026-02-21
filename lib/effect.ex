@@ -108,6 +108,34 @@ defmodule ZioEx.Effect do
     %__MODULE__{type: :zip_par, data: {left, right}}
   end
 
+  @doc """
+  Transforms the environment type required by this effect.
+  Often called 'provide_some' or 'local' in other functional libraries.
+  """
+  def contramap(effect, f) do
+    access(fn big_env ->
+      # We take the BigEnv, transform it to what the inner effect needs
+      small_env = f.(big_env)
+      # Then we provide that specific context to the original effect
+      provide_context(effect, small_env)
+    end)
+  end
+
+  @doc """
+  Runs a Non-Empty List (NEList) of validation effects in parallel.
+  Returns a single effect containing the accumulated Validation result.
+  """
+  def validate_par([first | rest]) do
+    Enum.reduce(rest, first, fn next_eff, acc_eff ->
+      # Run in parallel
+      zip_par(acc_eff, next_eff)
+      |> map(fn {acc_val, next_val} ->
+        # Polymorphic dispatch via Semigroup protocol
+        ZioEx.Semigroup.combine(acc_val, next_val)
+      end)
+    end)
+  end
+
   @doc "Lifts a result tuple {:ok, v} | {:error, e} into an Effect"
   def from_result({:ok, v}), do: succeed(v)
   def from_result({:error, e}), do: fail(e)

@@ -1,7 +1,7 @@
 defmodule ZioExTest do
   use ExUnit.Case
   import ZioEx.Macros
-  alias ZioEx.{Effect, Runtime, Schedule, Layer}
+  alias ZioEx.{Effect, Runtime, Schedule, Layer, Validation}
 
   describe "Core Mechanics" do
     test "succeed returns a constant value" do
@@ -49,6 +49,30 @@ defmodule ZioExTest do
         end)
 
       assert Runtime.run(program, env) == {:ok, "secret_123"}
+    end
+
+    test "contramap narrows the environment required by an effect" do
+      # This effect ONLY knows about db_url
+      db_logic =
+        zio do
+          %{db_url: url} <- Effect.access(fn r -> r end)
+          Effect.sync(fn -> "Connecting to #{url}..." end)
+        end
+
+      # Your global environment
+      global_env = %{
+        db_url: "postgres://...",
+        sms_key: "secret",
+        current_user: "owner"
+      }
+
+      # You "narrow" the requirements of db_logic
+      narrowed_program =
+        Effect.contramap(db_logic, fn env ->
+          %{db_url: env.db_url}
+        end)
+
+      assert Runtime.run(narrowed_program, global_env) == {:ok, "Connecting to postgres://......"}
     end
   end
 
@@ -390,5 +414,36 @@ defmodule ZioExTest do
       end
 
     assert ZioEx.Runtime.run(program) == {:ok, 2}
+  end
+
+  describe "validate_par" do
+    test "runs validation effects in parallel and combines successes" do
+      # Escrow-style: list of effects that return Validations (e.g. credit, property, signature)
+      checks = [
+        Effect.succeed(%Validation{result: {:ok, :credit_ok}}),
+        Effect.sync(fn -> %Validation{result: {:ok, :property_ok}} end),
+        Effect.succeed(%Validation{result: {:ok, :signature_ok}})
+      ]
+
+      program = Effect.validate_par(checks)
+
+      assert {:ok, %Validation{result: {:ok, [:credit_ok, :property_ok, :signature_ok]}}} =
+               Runtime.run(program)
+    end
+
+    test "accumulates all errors when multiple checks fail (Semigroup)" do
+      checks = [
+        Effect.succeed(%Validation{result: {:error, ["bad credit score"]}}),
+        Effect.succeed(%Validation{result: {:ok, :property_ok}}),
+        Effect.succeed(%Validation{result: {:error, ["invalid signature"]}})
+      ]
+
+      program = Effect.validate_par(checks)
+
+      # One error "wins" (Validation keeps first error when mixed ok/error); with two errors they merge
+      assert {:ok, %Validation{result: {:error, errors}}} = Runtime.run(program)
+      assert "bad credit score" in errors
+      assert "invalid signature" in errors
+    end
   end
 end
