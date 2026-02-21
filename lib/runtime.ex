@@ -3,7 +3,24 @@ defmodule ZioEx.Runtime do
 
   alias ZioEx.{Cause, Effect, Fiber}
 
-  def run(effect, env \\ %{}), do: loop(effect, [], env)
+  def run(effect, env \\ %{}) do
+    # 1. Generate a unique ID for this execution
+    meta = %{id: System.unique_integer([:positive]), env: env}
+    start_time = System.monotonic_time()
+
+    # 2. Emit the "start" event
+    emit_telemetry([:run, :start], %{system_time: System.system_time()}, meta)
+
+    # 3. Execute the loop
+    result = loop(effect, [], env)
+
+    # 4. Emit the "stop" event with duration
+    duration = System.monotonic_time() - start_time
+
+    emit_telemetry([:run, :stop], %{duration: duration}, Map.put(meta, :result, result))
+
+    result
+  end
 
   # --- Interpreter Loop ---
   defp loop(%Effect{type: :succeed, data: val}, stack, env), do: continue(val, stack, env)
@@ -96,6 +113,15 @@ defmodule ZioEx.Runtime do
 
       _ ->
         unwind(cause, rest, env)
+    end
+  end
+
+  defp emit_telemetry(event, measurements, metadata) do
+    if Code.ensure_loaded?(:telemetry) do
+      :telemetry.execute([:zio_ex | event], measurements, metadata)
+    else
+      # Do nothing if telemetry isn't installed
+      :ok
     end
   end
 end
