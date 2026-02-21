@@ -76,6 +76,24 @@ defmodule ZioEx.Runtime do
     loop(inner, stack, local_env)
   end
 
+  defp loop(%Effect{type: :zip_par, data: {left, right}}, stack, env) do
+    # 1. Spawn both in parallel tasks
+    t1 = Task.async(fn -> run(left, env) end)
+    t2 = Task.async(fn -> run(right, env) end)
+
+    # 2. Wait for results
+    res1 = Task.await(t1)
+    res2 = Task.await(t2)
+
+    # 3. Handle the outcomes
+    case {res1, res2} do
+      {{:ok, v1}, {:ok, v2}} -> continue({v1, v2}, stack, env)
+      {{:error, c1}, {:error, c2}} -> unwind(%ZioEx.Cause.Both{left: c1, right: c2}, stack, env)
+      {{:error, c}, _} -> unwind(c, stack, env)
+      {_, {:error, c}} -> unwind(c, stack, env)
+    end
+  end
+
   # --- Continuation Logic ---
   defp continue(val, [], _env), do: {:ok, val}
 

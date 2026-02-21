@@ -100,6 +100,14 @@ defmodule ZioEx.Effect do
     %__MODULE__{type: :provide, data: {effect, env}}
   end
 
+  @doc """
+  Runs two effects in parallel and returns a tuple of their results.
+  If either fails, the whole effect fails.
+  """
+  def zip_par(left, right) do
+    %__MODULE__{type: :zip_par, data: {left, right}}
+  end
+
   @doc "Lifts a result tuple {:ok, v} | {:error, e} into an Effect"
   def from_result({:ok, v}), do: succeed(v)
   def from_result({:error, e}), do: fail(e)

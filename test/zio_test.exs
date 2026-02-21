@@ -372,4 +372,23 @@ defmodule ZioExTest do
     # Even though we asked for it "twice" in the 'and', it only ran once.
     assert Agent.get(counter, & &1) == 1
   end
+
+  test "zip_par and Ref work together" do
+    program =
+      zio do
+        counter <- ZioEx.Ref.make(0)
+
+        # Run two increments in parallel
+        _ <-
+          ZioEx.Effect.zip_par(
+            ZioEx.Ref.update(counter, &(&1 + 1)),
+            ZioEx.Ref.update(counter, &(&1 + 1))
+          )
+
+        val <- ZioEx.Ref.get(counter)
+        ZioEx.Effect.succeed(val)
+      end
+
+    assert ZioEx.Runtime.run(program) == {:ok, 2}
+  end
 end
