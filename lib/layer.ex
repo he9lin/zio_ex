@@ -1,12 +1,20 @@
 defmodule ZioEx.Layer do
   alias ZioEx.Effect
 
+  defstruct [:effect, :keys]
+
+  @doc "Retrieves the keys from a layer manifest."
+  def keys(%__MODULE__{keys: keys}), do: keys
+
   @doc """
   Constructs a layer from a simple key-value pair.
   Equivalent to ZLayer.succeed.
   """
   def succeed(key, service) do
-    Effect.succeed(%{key => service})
+    %__MODULE__{
+      keys: List.wrap(key),
+      effect: Effect.succeed(%{key => service})
+    }
   end
 
   @doc """
@@ -14,9 +22,13 @@ defmodule ZioEx.Layer do
   Usage: Effect.access(...) |> Layer.from_effect(:db)
   """
   def from_effect(effect, key) do
-    Effect.map(effect, fn service ->
-      %{key => service}
-    end)
+    %__MODULE__{
+      keys: [key],
+      effect:
+        Effect.map(effect, fn service ->
+          %{key => service}
+        end)
+    }
   end
 
   @doc """
@@ -24,9 +36,13 @@ defmodule ZioEx.Layer do
   Equivalent to ZLayer.fromFunction.
   """
   def from_function(key, func) do
-    Effect.access(fn env ->
-      Effect.succeed(%{key => func.(env)})
-    end)
+    %__MODULE__{
+      keys: [key],
+      effect:
+        Effect.access(fn env ->
+          Effect.succeed(%{key => func.(env)})
+        end)
+    }
   end
 
   @doc """
@@ -34,45 +50,58 @@ defmodule ZioEx.Layer do
   Combines two layers that don't depend on each other.
   """
   def and_(layer_a, layer_b) do
-    Effect.flat_map(layer_a, fn map_a ->
-      Effect.map(layer_b, fn map_b ->
-        Map.merge(map_a, map_b)
-      end)
-    end)
+    %__MODULE__{
+      keys: Enum.uniq(layer_a.keys ++ layer_b.keys),
+      effect:
+        ZioEx.Effect.zip_par(layer_a.effect, layer_b.effect)
+        |> ZioEx.Effect.map(fn {a, b} -> Map.merge(a, b) end)
+    }
   end
 
   @doc """
-  Vertical Composition (>>> in ZIO).
-  The output of 'left' is passed as the environment to 'right'.
+  Vertical composition: Layer A is used to satisfy the requirements of Layer B.
+  The resulting Layer only 'promises' the keys of B.
   """
-  def to(left_layer, right_layer) do
-    Effect.flat_map(left_layer, fn env_from_left ->
-      # Here is the fix:
-      # Wrap the right_layer so it executes INSIDE the context of env_from_left
-      Effect.provide_context(right_layer, env_from_left)
-    end)
+  def to(%__MODULE__{} = layer_a, %__MODULE__{} = layer_b) do
+    %__MODULE__{
+      # The output of this pipeline is Layer B's services
+      keys: layer_b.keys,
+      effect:
+        ZioEx.Effect.flat_map(layer_a.effect, fn env_a ->
+          # We take the map produced by A and 'provide' it to B's effect
+          ZioEx.Effect.provide_context(layer_b.effect, env_a)
+        end)
+    }
   end
 
   @doc """
-  Ensures that the layer is only executed once.
-  Subsequent requests for this layer will return the cached result.
+  Ensures the layer's effect is only executed once.
+  Subsequent requests for this layer will return the cached environment.
   """
-  def memoize(layer) do
-    # We use an Agent to store the state: :uninitialized | {:initialized, map}
+  def memoize(%__MODULE__{} = layer) do
     {:ok, cache} = Agent.start_link(fn -> :uninitialized end)
 
-    Effect.sync(fn -> Agent.get(cache, & &1) end)
-    |> Effect.flat_map(fn
-      {:initialized, env_map} ->
-        Effect.succeed(env_map)
+    memoized_effect =
+      Effect.sync(fn ->
+        case Agent.get_and_update(cache, fn
+          {:result, env} -> {{:cached, env}, {:result, env}}
+          {:task, task} -> {{:await, task}, {:task, task}}
+          :uninitialized ->
+            task = Task.async(fn ->
+              {:ok, env} = ZioEx.Runtime.run(layer.effect)
+              env
+            end)
+            {{:run, task}, {:task, task}}
+        end) do
+          {:cached, env} -> env
+          {:await, task} -> Task.await(task)
+          {:run, task} ->
+            env = Task.await(task)
+            Agent.update(cache, fn _ -> {:result, env} end)
+            env
+        end
+      end)
 
-      :uninitialized ->
-        Effect.flat_map(layer, fn env_map ->
-          Effect.sync(fn ->
-            Agent.update(cache, fn _ -> {:initialized, env_map} end)
-            env_map
-          end)
-        end)
-    end)
+    %{layer | effect: memoized_effect}
   end
 end

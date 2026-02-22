@@ -3,7 +3,9 @@ defmodule ZioEx.Runtime do
 
   alias ZioEx.{Cause, Effect, Fiber}
 
-  def run(effect, env \\ %{}) do
+  def run(effect_or_layer, env \\ %{}) do
+    effect = extract_effect(effect_or_layer)
+
     # 1. Generate a unique ID for this execution
     meta = %{id: System.unique_integer([:positive]), env: env}
     start_time = System.monotonic_time()
@@ -21,6 +23,9 @@ defmodule ZioEx.Runtime do
 
     result
   end
+
+  defp extract_effect(%ZioEx.Layer{effect: e}), do: e
+  defp extract_effect(%Effect{} = e), do: e
 
   # --- Interpreter Loop ---
   defp loop(%Effect{type: :succeed, data: val}, stack, env), do: continue(val, stack, env)

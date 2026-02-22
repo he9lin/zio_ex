@@ -1,7 +1,27 @@
+defmodule ZioExTest.ClosingWorkflow do
+  use ZioEx.Workflow
+  import ZioEx.Macros
+  alias ZioEx.Effect
+  alias ZioEx.Workflow, as: W
+
+  requirements do
+    field :send_sms
+    field :db
+  end
+
+  workflow :run do
+    zio do
+      _send_sms <- W.require_service(:send_sms)
+      _db <- W.require_service(:db)
+      Effect.succeed(:ok)
+    end
+  end
+end
+
 defmodule ZioExTest do
   use ExUnit.Case
   import ZioEx.Macros
-  alias ZioEx.{Effect, Runtime, Schedule, Layer, Validation}
+  alias ZioEx.{Effect, Runtime, Runtime.Validator, Schedule, Layer, Validation}
 
   describe "Core Mechanics" do
     test "succeed returns a constant value" do
@@ -444,6 +464,27 @@ defmodule ZioExTest do
       assert {:ok, %Validation{result: {:error, errors}}} = Runtime.run(program)
       assert "bad credit score" in errors
       assert "invalid signature" in errors
+    end
+  end
+
+  describe "Runtime.Validator" do
+    test "validates successfully when layer provides all required services" do
+      main_layer =
+        Layer.and_(
+          Layer.succeed(:send_sms, "twilio_impl"),
+          Layer.succeed(:db, "postgres_impl")
+        )
+
+      assert Validator.validate!(ZioExTest.ClosingWorkflow, main_layer) == :ok
+    end
+
+    test "raises when workflow requires services the layer does not provide" do
+      # Layer only has :db, but ClosingWorkflow requires [:send_sms, :db]
+      main_layer = Layer.succeed(:db, "postgres://localhost")
+
+      assert_raise RuntimeError, ~r/Missing Dependencies/, fn ->
+        Validator.validate!(ZioExTest.ClosingWorkflow, main_layer)
+      end
     end
   end
 end

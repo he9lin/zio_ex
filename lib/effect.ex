@@ -1,5 +1,26 @@
 defmodule ZioEx.Effect do
-  defstruct [:type, :data]
+  defstruct [:type, :data, requirements: []]
+
+  # Experimental: track and validate requirements at compile-time
+  def require(key) do
+    %__MODULE__{
+      type: :require,
+      data: key,
+      # Track it here!
+      requirements: [key]
+    }
+  end
+
+  @doc """
+  Wraps a function that performs asynchronous work.
+  The function 'f' should return the result directly, or a Task.
+  """
+  def async(f) do
+    %__MODULE__{
+      type: :async,
+      data: f
+    }
+  end
 
   def succeed(val), do: %__MODULE__{type: :succeed, data: val}
 
@@ -60,12 +81,13 @@ defmodule ZioEx.Effect do
   end
 
   @doc "Provides a layer to an effect, satisfying its dependencies."
-  def provide(effect, layer) do
-    # We use zio macro style logic here:
+  def provide(effect, layer_or_effect) do
+    layer_effect = extract_layer_effect(layer_or_effect)
+
     # 1. Run the layer to get the env map
     # 2. Access the global env and merge the layer's output into it
     # 3. Run the original effect with the merged env
-    flat_map(layer, fn layer_env ->
+    flat_map(layer_effect, fn layer_env ->
       access(fn global_env ->
         # Here we 'provide' the environment by merging
         merged_env = Map.merge(global_env, layer_env)
@@ -74,6 +96,9 @@ defmodule ZioEx.Effect do
       end)
     end)
   end
+
+  defp extract_layer_effect(%ZioEx.Layer{effect: e}), do: e
+  defp extract_layer_effect(%__MODULE__{} = e), do: e
 
   def retry(effect, schedule, attempt \\ 0) do
     fold(
