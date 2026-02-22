@@ -85,23 +85,31 @@ defmodule ZioEx.Layer do
       Effect.sync(fn ->
         case Agent.get_and_update(cache, fn
           {:result, env} -> {{:cached, env}, {:result, env}}
-          {:task, task} -> {{:await, task}, {:task, task}}
-          :uninitialized ->
-            task = Task.async(fn ->
-              {:ok, env} = ZioEx.Runtime.run(layer.effect)
-              env
-            end)
-            {{:run, task}, {:task, task}}
+          :running -> {{:wait, nil}, :running}
+          :uninitialized -> {{:run, nil}, :running}
         end) do
-          {:cached, env} -> env
-          {:await, task} -> Task.await(task)
-          {:run, task} ->
-            env = Task.await(task)
+          {:cached, env} ->
+            env
+
+          {:run, _} ->
+            {:ok, env} = ZioEx.Runtime.run(layer.effect)
             Agent.update(cache, fn _ -> {:result, env} end)
             env
+
+          {:wait, _} ->
+            poll_until_ready(cache)
         end
       end)
 
     %{layer | effect: memoized_effect}
+  end
+
+  defp poll_until_ready(cache) do
+    case Agent.get(cache, & &1) do
+      {:result, env} -> env
+      _ ->
+        Process.sleep(1)
+        poll_until_ready(cache)
+    end
   end
 end
