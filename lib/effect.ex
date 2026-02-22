@@ -14,14 +14,15 @@ defmodule ZioEx.Effect do
   @doc """
   Wraps a callback-based async API into an Effect (ZIO.async style).
 
-  The function `f` receives a `resume` callback: `resume({:ok, val})` or `resume({:error, cause})`.
-  Register with external APIs, then call `resume` when the result is ready.
+  The callback runs in a spawned process. It receives a `resume` function:
+  call `resume.({:ok, val})` or `resume.({:error, cause})` when done.
+  The runtime awaits the result.
 
   Example:
       Effect.async(fn resume ->
         ExternalAPI.request(fn
-          {:ok, data} -> resume({:ok, data})
-          {:error, e} -> resume({:error, %ZioEx.Cause.Fail{error: e}})
+          {:ok, data} -> resume.({:ok, data})
+          {:error, e} -> resume.({:error, %ZioEx.Cause.Fail{error: e}})
         end)
       end)
   """
@@ -51,6 +52,15 @@ defmodule ZioEx.Effect do
     do: %__MODULE__{type: :fail, data: %ZioEx.Cause.Die{exception: exception, stacktrace: []}}
 
   def sync(func), do: %__MODULE__{type: :sync, data: func}
+
+  @doc """
+  Reads the environment.
+  - `access()` — returns the full env
+  - `access(:key)` — returns env[key] for a given atom
+  - `access(fn r -> ... end)` — applies the function to env
+  """
+  def access(), do: %__MODULE__{type: :access, data: fn r -> r end}
+  def access(key) when is_atom(key), do: %__MODULE__{type: :access, data: fn r -> Map.get(r, key) end}
   def access(func), do: %__MODULE__{type: :access, data: func}
   def fork(effect), do: %__MODULE__{type: :fork, data: effect}
   def join(fiber), do: %__MODULE__{type: :join, data: fiber}

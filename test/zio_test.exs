@@ -5,8 +5,8 @@ defmodule ZioExTest.ClosingWorkflow do
   alias ZioEx.Workflow, as: W
 
   requirements do
-    field :send_sms
-    field :db
+    field(:send_sms)
+    field(:db)
   end
 
   workflow :run do
@@ -71,11 +71,23 @@ defmodule ZioExTest do
       assert Runtime.run(program, env) == {:ok, "secret_123"}
     end
 
+    test "access with atom key returns env[key] directly" do
+      env = %{db_url: "postgres://localhost", api_key: "sk_123"}
+
+      program =
+        zio do
+          db_url <- Effect.access(:db_url)
+          Effect.succeed("Connecting to #{db_url}")
+        end
+
+      assert Runtime.run(program, env) == {:ok, "Connecting to postgres://localhost"}
+    end
+
     test "contramap narrows the environment required by an effect" do
       # This effect ONLY knows about db_url
       db_logic =
         zio do
-          %{db_url: url} <- Effect.access(fn r -> r end)
+          %{db_url: url} <- Effect.access()
           Effect.sync(fn -> "Connecting to #{url}..." end)
         end
 
@@ -141,14 +153,12 @@ defmodule ZioExTest do
       refute_receive :should_not_happen, 1100
     end
 
-    test "async runs callback-based async work and resumes with result" do
-      # Simulate a callback API (e.g. HTTP client) that calls back later
+    test "async runs callback in spawned process and resumes with result" do
+      # Callback runs in spawned process; no need to spawn inside
       program =
         Effect.async(fn resume ->
-          spawn(fn ->
-            Process.sleep(10)
-            resume.({:ok, "async result"})
-          end)
+          Process.sleep(10)
+          resume.({:ok, "async result"})
         end)
 
       assert Runtime.run(program) == {:ok, "async result"}
@@ -157,10 +167,8 @@ defmodule ZioExTest do
     test "async resumes with error on failure" do
       program =
         Effect.async(fn resume ->
-          spawn(fn ->
-            Process.sleep(10)
-            resume.({:error, %ZioEx.Cause.Fail{error: :api_timeout}})
-          end)
+          Process.sleep(10)
+          resume.({:error, %ZioEx.Cause.Fail{error: :api_timeout}})
         end)
 
       assert Runtime.run(program) == {:error, %ZioEx.Cause.Fail{error: :api_timeout}}
@@ -275,7 +283,7 @@ defmodule ZioExTest do
 
       program =
         zio do
-          %{multiplier: m} <- Effect.access(fn r -> r end)
+          %{multiplier: m} <- Effect.access()
           val <- Effect.succeed(10)
           Effect.succeed(val * m)
         end
@@ -386,7 +394,7 @@ defmodule ZioExTest do
     # 2. Define the Program (Requirements: :db)
     program =
       zio do
-        %{db: db} <- Effect.access(fn r -> r end)
+        %{db: db} <- Effect.access()
         result <- Effect.sync(fn -> db.query.("SELECT *") end)
         Effect.succeed(result)
       end
@@ -489,6 +497,25 @@ defmodule ZioExTest do
       assert {:ok, %Validation{result: {:error, errors}}} = Runtime.run(program)
       assert "bad credit score" in errors
       assert "invalid signature" in errors
+    end
+
+    test "validate_par works with Effect.async in checks" do
+      checks = [
+        Effect.async(fn resume ->
+          Process.sleep(20)
+          resume.({:ok, %Validation{result: {:ok, :a}}})
+        end),
+        Effect.async(fn resume ->
+          Process.sleep(10)
+          resume.({:ok, %Validation{result: {:ok, :b}}})
+        end),
+        Effect.succeed(%Validation{result: {:ok, :c}})
+      ]
+
+      program = Effect.validate_par(checks)
+
+      assert {:ok, %Validation{result: {:ok, result}}} = Runtime.run(program)
+      assert Enum.sort(result) == [:a, :b, :c]
     end
   end
 

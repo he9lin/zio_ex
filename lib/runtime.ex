@@ -49,10 +49,12 @@ defmodule ZioEx.Runtime do
     parent = self()
     ref = make_ref()
 
-    f.(fn
+    resume = fn
       {:ok, val} -> send(parent, {ref, {:ok, val}})
       {:error, cause} -> send(parent, {ref, {:error, cause}})
-    end)
+    end
+
+    spawn(fn -> f.(resume) end)
 
     receive do
       {^ref, {:ok, val}} -> continue(val, stack, env)
