@@ -76,24 +76,57 @@ defmodule ZioEx.Effect do
     %__MODULE__{type: :fold_cause, data: {eff, on_cause, on_success}}
   end
 
-  # Standard fold now just wraps fold_cause
-  def fold(eff, on_err, on_succ) do
+  @doc """
+  Fold with effect-returning callbacks.
+  on_err: (E -> Effect<B>), on_succ: (A -> Effect<B>)
+  """
+  def fold_zio(eff, on_err, on_succ) do
     fold_cause(
       eff,
       fn
         %ZioEx.Cause.Fail{error: e} -> on_err.(e)
-        # Re-raise Die/Interrupt
         cause -> %__MODULE__{type: :fail, data: cause}
       end,
       on_succ
     )
   end
 
-  def map(eff, f), do: fold(eff, &fail/1, fn v -> succeed(f.(v)) end)
+  @doc """
+  Fold with plain functions; results are lifted into Effects.
+  on_err: (E -> B), on_succ: (A -> B)
+  """
+  def fold(eff, on_err, on_succ) do
+    fold_zio(eff, fn e -> succeed(on_err.(e)) end, fn v -> succeed(on_succ.(v)) end)
+  end
 
-  def catch_all(eff, h), do: fold(eff, h, &succeed/1)
+  def map(eff, f), do: fold_zio(eff, &fail/1, fn v -> succeed(f.(v)) end)
 
-  def either(eff), do: fold(eff, fn e -> succeed({:error, e}) end, fn v -> succeed({:ok, v}) end)
+  def catch_all(eff, h), do: fold_zio(eff, h, &succeed/1)
+
+  @doc """
+  Catches only errors that the handler chooses to handle.
+  Handler receives the error and returns an Effect to recover, or `nil` to re-raise.
+  Only handles Fail (expected errors); Die/Interrupt are always re-raised.
+  """
+  def catch_some(eff, handler) do
+    fold_cause(
+      eff,
+      fn
+        %ZioEx.Cause.Fail{error: e} = cause ->
+          case handler.(e) do
+            nil -> fail_cause(cause)
+            %__MODULE__{} = recovery -> recovery
+            _ -> fail_cause(cause)
+          end
+
+        cause ->
+          fail_cause(cause)
+      end,
+      &succeed/1
+    )
+  end
+
+  def either(eff), do: fold_zio(eff, fn e -> succeed({:error, e}) end, fn v -> succeed({:ok, v}) end)
 
   @doc "Guarantees the finalizer runs after the effect, regardless of outcome."
   def ensuring(eff, finalizer) do
@@ -121,7 +154,7 @@ defmodule ZioEx.Effect do
   defp extract_layer_effect(%__MODULE__{} = e), do: e
 
   def retry(effect, schedule, attempt \\ 0) do
-    fold(
+    fold_zio(
       effect,
       fn err ->
         case schedule.next.(attempt) do
@@ -131,6 +164,27 @@ defmodule ZioEx.Effect do
 
           :halt ->
             fail(err)
+        end
+      end,
+      fn val -> succeed(val) end
+    )
+  end
+
+  @doc """
+  Like retry, but when the schedule halts, runs the fallback instead of failing.
+  Fallback receives (error, attempt_count) and returns an Effect.
+  """
+  def retry_or_else(effect, schedule, fallback, attempt \\ 0) do
+    fold_zio(
+      effect,
+      fn err ->
+        case schedule.next.(attempt) do
+          {:cont, delay, _} ->
+            sync(fn -> Process.sleep(delay) end)
+            |> flat_map(fn _ -> retry_or_else(effect, schedule, fallback, attempt + 1) end)
+
+          :halt ->
+            fallback.(err, attempt)
         end
       end,
       fn val -> succeed(val) end

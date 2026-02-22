@@ -197,6 +197,28 @@ defmodule ZioExTest do
       refute_receive :should_not_run
     end
 
+    test "catch_some handles only matching errors" do
+      program =
+        Effect.fail(:not_found)
+        |> Effect.catch_some(fn
+          :not_found -> Effect.succeed(:default_value)
+          _ -> nil
+        end)
+
+      assert Runtime.run(program) == {:ok, :default_value}
+    end
+
+    test "catch_some re-raises when handler returns nil" do
+      program =
+        Effect.fail(:other_error)
+        |> Effect.catch_some(fn
+          :not_found -> Effect.succeed(:recovered)
+          _ -> nil
+        end)
+
+      assert Runtime.run(program) == {:error, %ZioEx.Cause.Fail{error: :other_error}}
+    end
+
     test "nested catch_all handles the error at the correct level" do
       program =
         Effect.fail(:inner_error)
@@ -321,20 +343,31 @@ defmodule ZioExTest do
     end
   end
 
-  test "fold handles success" do
+  test "fold handles success (plain functions)" do
     program =
       Effect.succeed(10)
-      |> Effect.fold(fn _ -> Effect.succeed(0) end, fn v -> Effect.succeed(v + 1) end)
+      |> Effect.fold(fn _ -> 0 end, fn v -> v + 1 end)
 
     assert Runtime.run(program) == {:ok, 11}
   end
 
-  test "fold handles failure" do
+  test "fold handles failure (plain functions)" do
     program =
       Effect.fail(:error)
-      |> Effect.fold(fn _ -> Effect.succeed(:recovered) end, fn v -> Effect.succeed(v) end)
+      |> Effect.fold(fn _ -> :recovered end, fn v -> v end)
 
     assert Runtime.run(program) == {:ok, :recovered}
+  end
+
+  test "fold_zio uses effect-returning callbacks" do
+    program =
+      Effect.fail(:boom)
+      |> Effect.fold_zio(
+        fn _ -> Effect.sync(fn -> :recovered_via_effect end) end,
+        fn v -> Effect.succeed(v) end
+      )
+
+    assert Runtime.run(program) == {:ok, :recovered_via_effect}
   end
 
   test "retry with exponential backoff" do
@@ -350,6 +383,16 @@ defmodule ZioExTest do
     assert result == {:error, %ZioEx.Cause.Fail{error: :bad}}
     # It should have run 3 times (initial + 2 retries) with backoff delays
     assert end_time - start_time >= 25, "expected backoff delays (~30ms)"
+  end
+
+  test "retry_or_else runs fallback when schedule halts" do
+    program =
+      Effect.fail(:bad)
+      |> Effect.retry_or_else(Schedule.recurs(2), fn _err, _attempt ->
+        Effect.succeed(:default_data)
+      end)
+
+    assert Runtime.run(program) == {:ok, :default_data}
   end
 
   test "recovers from a catastrophic Die using fold_cause" do
