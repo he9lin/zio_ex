@@ -140,6 +140,31 @@ defmodule ZioExTest do
 
       refute_receive :should_not_happen, 1100
     end
+
+    test "async runs callback-based async work and resumes with result" do
+      # Simulate a callback API (e.g. HTTP client) that calls back later
+      program =
+        Effect.async(fn resume ->
+          spawn(fn ->
+            Process.sleep(10)
+            resume.({:ok, "async result"})
+          end)
+        end)
+
+      assert Runtime.run(program) == {:ok, "async result"}
+    end
+
+    test "async resumes with error on failure" do
+      program =
+        Effect.async(fn resume ->
+          spawn(fn ->
+            Process.sleep(10)
+            resume.({:error, %ZioEx.Cause.Fail{error: :api_timeout}})
+          end)
+        end)
+
+      assert Runtime.run(program) == {:error, %ZioEx.Cause.Fail{error: :api_timeout}}
+    end
   end
 
   describe "Error Unwinding (The E in REA)" do

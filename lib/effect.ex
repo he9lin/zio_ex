@@ -12,8 +12,18 @@ defmodule ZioEx.Effect do
   end
 
   @doc """
-  Wraps a function that performs asynchronous work.
-  The function 'f' should return the result directly, or a Task.
+  Wraps a callback-based async API into an Effect (ZIO.async style).
+
+  The function `f` receives a `resume` callback: `resume({:ok, val})` or `resume({:error, cause})`.
+  Register with external APIs, then call `resume` when the result is ready.
+
+  Example:
+      Effect.async(fn resume ->
+        ExternalAPI.request(fn
+          {:ok, data} -> resume({:ok, data})
+          {:error, e} -> resume({:error, %ZioEx.Cause.Fail{error: e}})
+        end)
+      end)
   """
   def async(f) do
     %__MODULE__{

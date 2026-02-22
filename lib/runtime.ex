@@ -38,6 +38,28 @@ defmodule ZioEx.Runtime do
     end
   end
 
+  defp loop(%Effect{type: :require, data: key}, stack, env) do
+    case Map.fetch(env, key) do
+      {:ok, service} -> continue(service, stack, env)
+      :error -> unwind(%ZioEx.Cause.Fail{error: {:missing_service, key}}, stack, env)
+    end
+  end
+
+  defp loop(%Effect{type: :async, data: f}, stack, env) do
+    parent = self()
+    ref = make_ref()
+
+    f.(fn
+      {:ok, val} -> send(parent, {ref, {:ok, val}})
+      {:error, cause} -> send(parent, {ref, {:error, cause}})
+    end)
+
+    receive do
+      {^ref, {:ok, val}} -> continue(val, stack, env)
+      {^ref, {:error, cause}} -> unwind(cause, stack, env)
+    end
+  end
+
   defp loop(%Effect{type: :access, data: f}, stack, env) do
     case f.(env) do
       %Effect{} = eff -> loop(eff, stack, env)
