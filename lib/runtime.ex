@@ -1,7 +1,7 @@
 defmodule ZioEx.Runtime do
   @moduledoc "The runtime for the ZioEx effect system."
 
-  alias ZioEx.{Cause, Effect, Fiber}
+  alias ZioEx.{Cause, Effect, Fiber, ResourceScope}
 
   def run(effect_or_layer, env \\ %{}) do
     effect = extract_effect(effect_or_layer)
@@ -51,13 +51,15 @@ defmodule ZioEx.Runtime do
     end
 
     {_, monitor} =
-      spawn_monitor(fn ->
-        try do
-          f.(resume)
-        rescue
-          e -> resume.({:error, %Cause.Die{exception: e, stacktrace: __STACKTRACE__}})
-        end
-      end)
+      spawn_monitor(
+        ResourceScope.inherit(fn ->
+          try do
+            f.(resume)
+          rescue
+            e -> resume.({:error, %Cause.Die{exception: e, stacktrace: __STACKTRACE__}})
+          end
+        end)
+      )
 
     receive do
       {^ref, result} ->
@@ -96,12 +98,11 @@ defmodule ZioEx.Runtime do
   defp loop(%Effect{type: :fail, data: cause}, stack, env), do: unwind(cause, stack, env)
 
   defp loop(%Effect{type: :fork, data: eff}, stack, env) do
-    task = Task.async(fn -> run(eff, env) end)
-    continue(%Fiber{task: task}, stack, env)
+    continue(Fiber.fork(fn -> run(eff, env) end), stack, env)
   end
 
-  defp loop(%Effect{type: :join, data: %Fiber{task: t}}, stack, env) do
-    case Task.await(t, :infinity) do
+  defp loop(%Effect{type: :join, data: %Fiber{} = fiber}, stack, env) do
+    case Fiber.join(fiber) do
       {:ok, val} -> continue(val, stack, env)
       {:error, err} -> unwind(err, stack, env)
     end
@@ -123,8 +124,8 @@ defmodule ZioEx.Runtime do
 
   defp loop(%Effect{type: :zip_par, data: {left, right}}, stack, env) do
     # 1. Spawn both in parallel tasks
-    t1 = Task.async(fn -> run(left, env) end)
-    t2 = Task.async(fn -> run(right, env) end)
+    t1 = Task.async(ResourceScope.inherit(fn -> run(left, env) end))
+    t2 = Task.async(ResourceScope.inherit(fn -> run(right, env) end))
 
     # 2. Wait for results
     res1 = Task.await(t1, :infinity)
@@ -138,6 +139,40 @@ defmodule ZioEx.Runtime do
       {_, {:error, c}} -> unwind(c, stack, env)
     end
   end
+
+  defp loop(%Effect{type: :foreach, data: {items, mapper, limit}}, stack, env) do
+    result = invoke(fn -> foreach(items, mapper, limit, env) end)
+    loop(result, stack, env)
+  end
+
+  defp foreach(items, mapper, limit, env) do
+    run_item = fn item -> run(Effect.flat_map(Effect.succeed(item), mapper), env) end
+
+    items
+    |> Stream.chunk_every(limit)
+    |> Enum.reduce_while({:ok, []}, fn batch, {:ok, acc} ->
+      case collect_results(run_batch(batch, run_item, limit), acc) do
+        {:ok, _} = success -> {:cont, success}
+        {:error, _} = failure -> {:halt, failure}
+      end
+    end)
+    |> case do
+      {:ok, reversed} -> Effect.succeed(Enum.reverse(reversed))
+      {:error, cause} -> Effect.fail_cause(cause)
+    end
+  end
+
+  defp run_batch([item], run_item, 1), do: [run_item.(item)]
+
+  defp run_batch(batch, run_item, _limit) do
+    batch
+    |> Enum.map(fn item -> Task.async(ResourceScope.inherit(fn -> run_item.(item) end)) end)
+    |> Task.await_many(:infinity)
+  end
+
+  defp collect_results([], acc), do: {:ok, acc}
+  defp collect_results([{:ok, value} | rest], acc), do: collect_results(rest, [value | acc])
+  defp collect_results([{:error, _} = failure | _], _acc), do: failure
 
   # --- Continuation Logic ---
   defp continue(val, [], _env), do: {:ok, val}

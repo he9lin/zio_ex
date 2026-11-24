@@ -4,7 +4,7 @@ defmodule ZioEx.Layer.Cache do
 
   alias ZioEx.Cause
 
-  def start_link, do: GenServer.start_link(__MODULE__, :empty)
+  def start_link(:empty), do: GenServer.start_link(__MODULE__, :empty)
 
   def fetch(cache, build) do
     case GenServer.call(cache, :fetch, :infinity) do

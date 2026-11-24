@@ -1,5 +1,5 @@
 defmodule ZioEx.Layer do
-  alias ZioEx.Effect
+  alias ZioEx.{Effect, ResourceScope}
 
   defstruct [:effect, :keys]
 
@@ -76,14 +76,20 @@ defmodule ZioEx.Layer do
 
   @doc """
   Ensures the layer's effect is only executed once.
+  The cache lives until the process owning the memoized layer exits.
   The first caller supplies the build environment. All callers share its success or failure.
   """
   def memoize(%__MODULE__{} = layer) do
-    {:ok, cache} = ZioEx.Layer.Cache.start_link()
+    scope = ResourceScope.current()
+    {:ok, cache} = ResourceScope.start_child({ZioEx.Layer.Cache, :empty})
 
     memoized_effect =
       Effect.access(fn env ->
-        case ZioEx.Layer.Cache.fetch(cache, fn -> ZioEx.Runtime.run(layer.effect, env) end) do
+        build = fn ->
+          ResourceScope.within(scope, fn -> ZioEx.Runtime.run(layer.effect, env) end)
+        end
+
+        case ZioEx.Layer.Cache.fetch(cache, build) do
           {:ok, services} -> Effect.succeed(services)
           {:error, cause} -> Effect.fail_cause(cause)
         end

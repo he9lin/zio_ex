@@ -1,9 +1,10 @@
 defmodule ZioEx.Ref do
+  @moduledoc "An atomic reference owned by the runtime caller and shared with its branches."
   defstruct [:agent]
 
   def make(initial_value) do
     ZioEx.Effect.sync(fn ->
-      {:ok, agent} = Agent.start_link(fn -> initial_value end)
+      {:ok, agent} = ZioEx.ResourceScope.start_child({Agent, fn -> initial_value end})
       %__MODULE__{agent: agent}
     end)
   end

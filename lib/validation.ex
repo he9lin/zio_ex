@@ -3,26 +3,24 @@ defmodule ZioEx.Validation do
 
   def succeed(result), do: %__MODULE__{result: {:ok, result}}
 
-  defimpl ZioEx.Semigroup, for: ZioEx.Validation do
-    alias ZioEx.Validation
+  @doc "Constructs a failed validation containing one error."
+  def fail(error), do: %__MODULE__{result: {:error, [error]}}
 
-    def combine(%{result: r1}, %{result: r2}) do
-      case {r1, r2} do
-        # We wrap 'a' and 'b' to ensure we are always concatenating lists
-        {{:ok, a}, {:ok, b}} ->
-          Validation.succeed(List.wrap(a) ++ List.wrap(b))
+  @doc "Combines two successful values or collects both validations' errors in input order."
+  def validate_with(%__MODULE__{result: {:ok, a}}, %__MODULE__{result: {:ok, b}}, combine) do
+    succeed(combine.(a, b))
+  end
 
-        # Errors already use lists, so we just ++ them
-        {{:error, e1}, {:error, e2}} ->
-          %Validation{result: {:error, e1 ++ e2}}
+  def validate_with(%__MODULE__{result: {:error, a}}, %__MODULE__{result: {:error, b}}, _) do
+    %__MODULE__{result: {:error, a ++ b}}
+  end
 
-        # Short-circuiting logic: Error always wins over OK
-        {{:error, _}, _} ->
-          %Validation{result: r1}
+  def validate_with(%__MODULE__{result: {:error, _}} = invalid, %__MODULE__{}, _), do: invalid
+  def validate_with(%__MODULE__{}, %__MODULE__{result: {:error, _}} = invalid, _), do: invalid
 
-        {_, {:error, _}} ->
-          %Validation{result: r2}
-      end
+  defimpl ZioEx.Semigroup do
+    def combine(left, right) do
+      ZioEx.Validation.validate_with(left, right, fn a, b -> List.wrap(a) ++ List.wrap(b) end)
     end
   end
 end
