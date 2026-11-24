@@ -3,6 +3,38 @@ defmodule ZioEx.CommonFeaturesTest do
 
   alias ZioEx.{Cause, Effect, Runtime, Validation}
 
+  test "map_error transforms expected failures and preserves other outcomes" do
+    mapped = Effect.map_error(Effect.fail(:enoent), fn :enoent -> :user_not_found end)
+    assert Runtime.run(mapped) == {:error, %Cause.Fail{error: :user_not_found}}
+
+    unused = fn _ -> flunk("unexpected error callback") end
+    assert Runtime.run(Effect.map_error(Effect.succeed(:ok), unused)) == {:ok, :ok}
+
+    for cause <- [
+          %Cause.Die{exception: :boom},
+          %Cause.Interrupt{},
+          %Cause.Both{left: %Cause.Fail{error: :a}, right: %Cause.Fail{error: :b}}
+        ] do
+      assert Runtime.run(Effect.map_error(Effect.fail_cause(cause), unused)) == {:error, cause}
+    end
+  end
+
+  test "tap observes success once, preserves its value, and propagates failures" do
+    observe = fn value -> Effect.sync(fn -> send(self(), {:observed, value}) end) end
+    tapped = Effect.tap(Effect.succeed(42), observe)
+    refute_received {:observed, _}
+    assert Runtime.run(tapped) == {:ok, 42}
+    assert_received {:observed, 42}
+    refute_received {:observed, _}
+
+    assert Runtime.run(Effect.tap(Effect.fail(:load), observe)) ==
+             {:error, %Cause.Fail{error: :load}}
+
+    refute_received {:observed, _}
+    failed = Effect.tap(Effect.succeed(42), fn _ -> Effect.fail(:audit) end)
+    assert Runtime.run(failed) == {:error, %Cause.Fail{error: :audit}}
+  end
+
   test "validate_with preserves successful value shapes and accumulates independent errors" do
     email = Validation.succeed("a@example.com")
     roles = Validation.succeed([:admin])
@@ -87,7 +119,9 @@ defmodule ZioEx.CommonFeaturesTest do
           3 ->
             send(parent, :unexpected)
             Effect.succeed(3)
-        end, max_concurrency: 2)
+        end,
+        max_concurrency: 2
+      )
 
     assert {:error, %Cause.Die{exception: %RuntimeError{message: "bad mapper"}}} =
              Runtime.run(program)

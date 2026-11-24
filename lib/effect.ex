@@ -101,6 +101,14 @@ defmodule ZioEx.Effect do
 
   def map(eff, f), do: fold_zio(eff, &fail/1, fn v -> succeed(f.(v)) end)
 
+  @doc "Transforms the error of a Fail cause. Other causes and successful values pass through."
+  def map_error(eff, f), do: catch_all(eff, fn error -> fail(f.(error)) end)
+
+  @doc "Runs a callback effect on success, preserving the original value if the callback succeeds."
+  def tap(eff, f) do
+    flat_map(eff, fn value -> map(f.(value), fn _ -> value end) end)
+  end
+
   def catch_all(eff, h), do: fold_zio(eff, h, &succeed/1)
 
   @doc """

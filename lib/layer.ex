@@ -1,7 +1,11 @@
 defmodule ZioEx.Layer do
   alias ZioEx.{Effect, ResourceScope}
 
-  defstruct [:effect, :keys]
+  defstruct [:effect, :keys, :manifest]
+
+  @doc false
+  def manifest(%__MODULE__{manifest: nil, keys: keys}), do: {:provider, keys, :unknown}
+  def manifest(%__MODULE__{manifest: manifest}), do: manifest
 
   @doc "Retrieves the keys from a layer manifest."
   def keys(%__MODULE__{keys: keys}), do: keys
@@ -12,18 +16,23 @@ defmodule ZioEx.Layer do
   """
   def succeed(key, service) do
     %__MODULE__{
-      keys: List.wrap(key),
+      keys: [key],
+      manifest: {:provider, [key], []},
       effect: Effect.succeed(%{key => service})
     }
   end
 
   @doc """
-  If we want to pipe an Effect into a Layer, the key should come last.
-  Usage: Effect.access(...) |> Layer.from_effect(:db)
+  Builds a service from an effect. Declare its inputs for checked workflow wiring.
+
+      connect_effect |> Layer.from_effect(:db, requires: [:db_url])
   """
-  def from_effect(effect, key) do
+  def from_effect(effect, key, opts \\ []) do
+    opts = Keyword.validate!(opts, [:requires])
+
     %__MODULE__{
       keys: [key],
+      manifest: provider_manifest(key, opts),
       effect:
         Effect.map(effect, fn service ->
           %{key => service}
@@ -32,17 +41,33 @@ defmodule ZioEx.Layer do
   end
 
   @doc """
-  Constructs a layer that requires dependencies from the environment.
-  Equivalent to ZLayer.fromFunction.
+  Builds a service value from the environment. Pass `requires:` to check the
+  inputs before acquisition. The function-only form leaves its inputs unknown.
+
+      Layer.from_function(:db, requires: [:db_url], build: fn %{db_url: url} -> DB.new(url) end)
   """
-  def from_function(key, func) do
+  def from_function(key, func) when is_function(func, 1), do: from_function(key, build: func)
+
+  def from_function(key, opts) when is_list(opts) do
+    opts = Keyword.validate!(opts, [:requires, :build])
+    func = Keyword.fetch!(opts, :build)
+
     %__MODULE__{
       keys: [key],
+      manifest: provider_manifest(key, opts),
       effect:
         Effect.access(fn env ->
           Effect.succeed(%{key => func.(env)})
         end)
     }
+  end
+
+  defp provider_manifest(key, opts) do
+    case Keyword.fetch(opts, :requires) do
+      :error -> {:provider, [key], :unknown}
+      {:ok, keys} when is_list(keys) -> {:provider, [key], Enum.uniq(keys)}
+      {:ok, _} -> raise ArgumentError, "requires must be a list of service keys"
+    end
   end
 
   @doc """
@@ -52,6 +77,7 @@ defmodule ZioEx.Layer do
   def and_(layer_a, layer_b) do
     %__MODULE__{
       keys: Enum.uniq(layer_a.keys ++ layer_b.keys),
+      manifest: {:and, manifest(layer_a), manifest(layer_b)},
       effect:
         ZioEx.Effect.zip_par(layer_a.effect, layer_b.effect)
         |> ZioEx.Effect.map(fn {a, b} -> Map.merge(a, b) end)
@@ -66,6 +92,7 @@ defmodule ZioEx.Layer do
     %__MODULE__{
       # The output of this pipeline is Layer B's services
       keys: layer_b.keys,
+      manifest: {:to, manifest(layer_a), manifest(layer_b)},
       effect:
         ZioEx.Effect.flat_map(layer_a.effect, fn env_a ->
           # We take the map produced by A and 'provide' it to B's effect

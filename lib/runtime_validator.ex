@@ -1,25 +1,32 @@
 defmodule ZioEx.Runtime.Validator do
-  @doc "Static check to ensure all required services are provided."
-  def validate!(workflow_module, %ZioEx.Layer{} = layer) do
-    # 1. Get requirements from Workflow metadata
-    required = workflow_module.__requirements__()
+  alias ZioEx.Layer
 
-    # 2. Get provided keys from Layer manifest
-    provided = ZioEx.Layer.keys(layer)
+  @doc "Checks declared layer inputs and all service requirements in a workflow module."
+  def validate!(module, %Layer{} = layer) do
+    check!(inspect(module), module.__requirements__(), layer)
+  end
 
-    # 3. Check for gaps
-    case required -- provided do
-      [] ->
-        :ok
+  @doc "Checks the explicit graph and the requirements of one named workflow."
+  def validate!(module, name, %Layer{} = layer) do
+    check!("#{inspect(module)}.#{name}/0", module.__requirements__(name), layer)
+  end
 
-      missing ->
-        raise """
-        --- ZioEx Wiring Error ---
-        Workflow: #{inspect(workflow_module)}
-        Missing Dependencies: #{inspect(missing)}
-        Actually Provided: #{inspect(provided)}
-        --------------------------
-        """
+  defp check!(workflow, required, layer) do
+    case Layer.Manifest.check(Layer.manifest(layer), []) do
+      {:ok, provided} ->
+        case required -- provided do
+          [] ->
+            :ok
+
+          missing ->
+            raise "Workflow #{workflow}: Missing Dependencies #{inspect(missing)}. Provided: #{inspect(provided)}"
+        end
+
+      {:error, {:missing_inputs, inputs, outputs}} ->
+        raise "Workflow #{workflow}: missing #{inspect(inputs)} required by layer providing #{inspect(outputs)}"
+
+      {:error, {:duplicate_outputs, keys}} ->
+        raise "Workflow #{workflow}: Duplicate layer outputs #{inspect(keys)}"
     end
   end
 end
