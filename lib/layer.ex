@@ -76,40 +76,19 @@ defmodule ZioEx.Layer do
 
   @doc """
   Ensures the layer's effect is only executed once.
-  Subsequent requests for this layer will return the cached environment.
+  The first caller supplies the build environment. All callers share its success or failure.
   """
   def memoize(%__MODULE__{} = layer) do
-    {:ok, cache} = Agent.start_link(fn -> :uninitialized end)
+    {:ok, cache} = ZioEx.Layer.Cache.start_link()
 
     memoized_effect =
-      Effect.sync(fn ->
-        case Agent.get_and_update(cache, fn
-          {:result, env} -> {{:cached, env}, {:result, env}}
-          :running -> {{:wait, nil}, :running}
-          :uninitialized -> {{:run, nil}, :running}
-        end) do
-          {:cached, env} ->
-            env
-
-          {:run, _} ->
-            {:ok, env} = ZioEx.Runtime.run(layer.effect)
-            Agent.update(cache, fn _ -> {:result, env} end)
-            env
-
-          {:wait, _} ->
-            poll_until_ready(cache)
+      Effect.access(fn env ->
+        case ZioEx.Layer.Cache.fetch(cache, fn -> ZioEx.Runtime.run(layer.effect, env) end) do
+          {:ok, services} -> Effect.succeed(services)
+          {:error, cause} -> Effect.fail_cause(cause)
         end
       end)
 
     %{layer | effect: memoized_effect}
-  end
-
-  defp poll_until_ready(cache) do
-    case Agent.get(cache, & &1) do
-      {:result, env} -> env
-      _ ->
-        Process.sleep(1)
-        poll_until_ready(cache)
-    end
   end
 end

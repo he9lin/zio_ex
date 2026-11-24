@@ -31,11 +31,7 @@ defmodule ZioEx.Runtime do
   defp loop(%Effect{type: :succeed, data: val}, stack, env), do: continue(val, stack, env)
 
   defp loop(%Effect{type: :sync, data: f}, stack, env) do
-    try do
-      continue(f.(), stack, env)
-    rescue
-      e -> unwind(%Cause.Die{exception: e, stacktrace: __STACKTRACE__}, stack, env)
-    end
+    loop(invoke(fn -> Effect.succeed(f.()) end), stack, env)
   end
 
   defp loop(%Effect{type: :require, data: key}, stack, env) do
@@ -54,19 +50,39 @@ defmodule ZioEx.Runtime do
       {:error, cause} -> send(parent, {ref, {:error, cause}})
     end
 
-    spawn(fn -> f.(resume) end)
+    {_, monitor} =
+      spawn_monitor(fn ->
+        try do
+          f.(resume)
+        rescue
+          e -> resume.({:error, %Cause.Die{exception: e, stacktrace: __STACKTRACE__}})
+        end
+      end)
 
     receive do
-      {^ref, {:ok, val}} -> continue(val, stack, env)
-      {^ref, {:error, cause}} -> unwind(cause, stack, env)
+      {^ref, result} ->
+        Process.demonitor(monitor, [:flush])
+
+        case result do
+          {:ok, val} -> continue(val, stack, env)
+          {:error, cause} -> unwind(cause, stack, env)
+        end
+
+      {:DOWN, ^monitor, :process, _, reason} when reason != :normal ->
+        unwind(%Cause.Die{exception: %ErlangError{original: reason}, stacktrace: []}, stack, env)
     end
   end
 
   defp loop(%Effect{type: :access, data: f}, stack, env) do
-    case f.(env) do
-      %Effect{} = eff -> loop(eff, stack, env)
-      val -> continue(val, stack, env)
-    end
+    effect =
+      invoke(fn ->
+        case f.(env) do
+          %Effect{} = eff -> eff
+          val -> Effect.succeed(val)
+        end
+      end)
+
+    loop(effect, stack, env)
   end
 
   defp loop(%Effect{type: :flat_map, data: {inner, f}}, stack, env) do
@@ -85,7 +101,7 @@ defmodule ZioEx.Runtime do
   end
 
   defp loop(%Effect{type: :join, data: %Fiber{task: t}}, stack, env) do
-    case Task.await(t) do
+    case Task.await(t, :infinity) do
       {:ok, val} -> continue(val, stack, env)
       {:error, err} -> unwind(err, stack, env)
     end
@@ -100,9 +116,9 @@ defmodule ZioEx.Runtime do
     loop(inner, [{:finalizer, finalizer} | stack], env)
   end
 
-  defp loop(%Effect{type: :provide, data: {inner, local_env}}, stack, _global_env) do
+  defp loop(%Effect{type: :provide, data: {inner, local_env}}, stack, global_env) do
     # Switch to the local_env for the duration of the inner effect
-    loop(inner, stack, local_env)
+    loop(inner, [{:restore_env, global_env} | stack], local_env)
   end
 
   defp loop(%Effect{type: :zip_par, data: {left, right}}, stack, env) do
@@ -111,8 +127,8 @@ defmodule ZioEx.Runtime do
     t2 = Task.async(fn -> run(right, env) end)
 
     # 2. Wait for results
-    res1 = Task.await(t1)
-    res2 = Task.await(t2)
+    res1 = Task.await(t1, :infinity)
+    res2 = Task.await(t2, :infinity)
 
     # 3. Handle the outcomes
     case {res1, res2} do
@@ -135,10 +151,13 @@ defmodule ZioEx.Runtime do
         loop(final_eff, rest, env)
 
       {:fold_cause_handler, {_, on_succ}} ->
-        loop(on_succ.(val), rest, env)
+        loop(invoke(fn -> on_succ.(val) end), rest, env)
 
       {:map, f} ->
-        loop(f.(val), rest, env)
+        loop(invoke(fn -> f.(val) end), rest, env)
+
+      {:restore_env, outer_env} ->
+        continue(val, rest, outer_env)
 
       _ ->
         continue(val, rest, env)
@@ -156,11 +175,21 @@ defmodule ZioEx.Runtime do
         loop(final_eff, rest, env)
 
       {:fold_cause_handler, {on_cause, _}} ->
-        loop(on_cause.(cause), rest, env)
+        loop(invoke(fn -> on_cause.(cause) end), rest, env)
+
+      {:restore_env, outer_env} ->
+        unwind(cause, rest, outer_env)
 
       _ ->
         unwind(cause, rest, env)
     end
+  end
+
+  # Limit rescue to user code so defects unwind the currently active frames.
+  defp invoke(callback) do
+    callback.()
+  rescue
+    e -> Effect.fail_cause(%Cause.Die{exception: e, stacktrace: __STACKTRACE__})
   end
 
   defp emit_telemetry(event, measurements, metadata) do
