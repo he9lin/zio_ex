@@ -76,6 +76,28 @@ defmodule BookingBillingTest do
              Enum.sort([{:billing_invoices, event.event_id}, {:billing_invoices, "second-event"}])
   end
 
+  test "Billing consumes a v1 payload saved before schemas were introduced" do
+    {:atomic, :ok} =
+      :mnesia.transaction(fn ->
+        :mnesia.write(
+          {:outbox, "historical-event", "booking.reserved.v1", ~s({"booking_id":"BK-42"})}
+        )
+      end)
+
+    assert {:ok, [:processed]} = Runtime.run(Billing.catch_up())
+    assert ["BK-42"] == :mnesia.dirty_all_keys(:drafts)
+  end
+
+  test "an invalid booking payload fails before Billing records a receipt or draft" do
+    event = %{event_id: "invalid-event", payload: ~s({"booking_id":42})}
+
+    assert {:error, %ZioEx.Cause.Fail{error: {:expected, [:booking_id], :string}}} =
+             Runtime.run(Billing.deliver(event))
+
+    assert [] == :mnesia.dirty_all_keys(:receipts)
+    assert [] == :mnesia.dirty_all_keys(:drafts)
+  end
+
   test "failed outbox and draft writes roll back reservations and receipts", %{tmp_dir: dir} do
     {:atomic, :ok} = :mnesia.delete_table(:outbox)
     assert {:error, _} = book()

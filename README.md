@@ -65,5 +65,6 @@ Billing records its receipt and invoice draft in a single transaction. The recei
 | [Collection traversal](docs/traversal.md) | Apply an effect to each item with bounded concurrency. |
 | [Resources and finalizers](docs/resources.md) | Release a resource after successful or failed use. |
 | [Atomic references](docs/ref.md) | Share mutable state between concurrent effects. |
+| [Schemas](docs/schema.md) | Encode and decode a struct as JSON and render its fields as Markdown. |
 | [Validation](docs/validation.md) | Collect independent errors and construct a validated value. |
 | [Option and Result](docs/option-and-result.md) | Bring optional values and tagged tuples into an effect. |

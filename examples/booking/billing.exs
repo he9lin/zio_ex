@@ -1,7 +1,10 @@
 # Mix prunes unused OTP applications. Load the bundled store only for this example.
 Mix.ensure_application!(:mnesia)
+Code.require_file("booking_reserved_v1.exs", __DIR__)
 
 defmodule BookingExample.Store do
+  alias BookingExample.BookingReservedV1
+  alias ZioEx.Schema.JSON
   alias ZioEx.Effect
 
   @tables [
@@ -48,15 +51,18 @@ defmodule BookingExample.Store do
       # One reservation emits one reserved event. Both identities survive redelivery.
       reference = "BK-" <> Base.encode16(:crypto.strong_rand_bytes(8))
       id = "booking.reserved.v1/" <> reference
+      event = %BookingReservedV1{booking_id: reference}
+      {:ok, payload} = JSON.encode(BookingReservedV1.schema(), event)
       :mnesia.write({:reservations, request.slot, reference, request})
-      :mnesia.write({:outbox, id, "booking.reserved.v1", JSON.encode!(%{booking_id: reference})})
+      :mnesia.write({:outbox, id, "booking.reserved.v1", payload})
       reference
     end)
   end
 end
 
 defmodule BookingExample.Billing do
-  alias BookingExample.Store
+  alias BookingExample.{BookingReservedV1, Store}
+  alias ZioEx.Schema.JSON
   alias ZioEx.Effect
 
   def pending do
@@ -78,7 +84,12 @@ defmodule BookingExample.Billing do
 
       case :mnesia.read(:receipts, key, :write) do
         [] ->
-          %{"booking_id" => booking_id} = JSON.decode!(payload)
+          booking_id =
+            case JSON.decode(BookingReservedV1.schema(), payload) do
+              {:ok, event} -> event.booking_id
+              {:error, reason} -> :mnesia.abort(reason)
+            end
+
           :mnesia.write({:receipts, key, booking_id})
 
           if :mnesia.read(:drafts, booking_id, :write) == [] do
