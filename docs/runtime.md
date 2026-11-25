@@ -13,6 +13,8 @@ The interpreter keeps a stack of pending steps and finalizers. On success it res
 
 ## Telemetry events
 
+If the host application supplies Telemetry, the runtime emits the events below. ZioEx itself has no package dependencies.
+
 | Event | Measurements | Metadata |
 | --- | --- | --- |
 | `[:zio_ex, :run, :start]` | `system_time` | `id`, `env` |

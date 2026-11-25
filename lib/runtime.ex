@@ -227,6 +227,7 @@ defmodule ZioEx.Runtime do
     e -> Effect.fail_cause(%Cause.Die{exception: e, stacktrace: __STACKTRACE__})
   end
 
+  @compile {:no_warn_undefined, {:telemetry, :execute, 3}}
   defp emit_telemetry(event, measurements, metadata) do
     if Code.ensure_loaded?(:telemetry) do
       :telemetry.execute([:zio_ex | event], measurements, metadata)
