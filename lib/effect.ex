@@ -101,6 +101,14 @@ defmodule ZioEx.Effect do
 
   def map(eff, f), do: fold_zio(eff, &fail/1, fn v -> succeed(f.(v)) end)
 
+  @doc "Transforms the error of a Fail cause. Other causes and successful values pass through."
+  def map_error(eff, f), do: catch_all(eff, fn error -> fail(f.(error)) end)
+
+  @doc "Runs a callback effect on success, preserving the original value if the callback succeeds."
+  def tap(eff, f) do
+    flat_map(eff, fn value -> map(f.(value), fn _ -> value end) end)
+  end
+
   def catch_all(eff, h), do: fold_zio(eff, h, &succeed/1)
 
   @doc """
@@ -131,6 +139,18 @@ defmodule ZioEx.Effect do
   @doc "Guarantees the finalizer runs after the effect, regardless of outcome."
   def ensuring(eff, finalizer) do
     %__MODULE__{type: :ensuring, data: {eff, finalizer}}
+  end
+
+  @doc """
+  Acquires a resource, passes it to `use_resource`, and releases it once use finishes.
+  Both callbacks return effects. A failed acquisition skips both callbacks.
+  A release failure takes precedence, as with `ensuring/2`.
+  """
+  def acquire_release_with(acquire, use_resource, release) do
+    flat_map(acquire, fn resource ->
+      acquired = succeed(resource)
+      ensuring(flat_map(acquired, use_resource), flat_map(acquired, release))
+    end)
   end
 
   @doc "Provides a layer to an effect, satisfying its dependencies."
@@ -205,6 +225,23 @@ defmodule ZioEx.Effect do
   """
   def zip_par(left, right) do
     %__MODULE__{type: :zip_par, data: {left, right}}
+  end
+
+  @doc """
+  Runs an effect for each element of an enumerable and returns values in input order.
+
+  Defaults to sequential execution in the caller. With `:max_concurrency` greater
+  than one, executes batches of up to that size. Each started batch completes,
+  including finalizers, before the first failure in input order is propagated.
+  """
+  def foreach(items, mapper, opts \\ []) when is_function(mapper, 1) do
+    limit = Keyword.fetch!(Keyword.validate!(opts, max_concurrency: 1), :max_concurrency)
+
+    unless is_integer(limit) and limit > 0 do
+      raise ArgumentError, "max_concurrency must be a positive integer"
+    end
+
+    %__MODULE__{type: :foreach, data: {items, mapper, limit}}
   end
 
   @doc """
